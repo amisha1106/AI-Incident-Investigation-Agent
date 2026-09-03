@@ -108,7 +108,7 @@ Output:
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/yourusername/incident-ai-agent.git
+git clone https://github.com/amisha1106/incident-ai-agent.git
 cd incident-ai-agent
 
 # Create virtual environment
