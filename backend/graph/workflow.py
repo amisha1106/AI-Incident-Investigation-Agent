@@ -1,110 +1,257 @@
 """
-LangGraph multi-agent workflow for incident investigation.
+LangGraph workflow for IncidentIQ.
 
-Graph structure:
-    START → planner → [log_agent, metrics_agent, deployment_agent] → rootcause → summarizer → END
+Current architecture:
 
-All data-collection agents run sequentially (LangGraph handles state passing).
-Future: can be parallelized with Send() API.
+    START
+      ↓
+    Investigation Orchestrator
+      ↓
+    Final Investigation Result
+      ↓
+    END
+
+The orchestrator internally handles:
+
+    Investigation Agent
+          ↓
+      Tool Selection
+          ↓
+      Evidence Collection
+          ↓
+       Reasoning
+          ↓
+      Next Investigation
+          ↓
+      Final Synthesis
 """
 
-from typing import TypedDict, Annotated
+from typing import TypedDict
+
 from langgraph.graph import StateGraph, START, END
 from loguru import logger
 
-from agents.planner import run_planner
-from agents.log_agent import run_log_agent
-from agents.metrics_agent import run_metrics_agent
-from agents.deployment_agent import run_deployment_agent
-from agents.rootcause_agent import run_rootcause_agent
-from agents.summarizer import run_summarizer
+from agents.orchestrator import run_investigation_loop
 
 
-# ── State Schema ────────────────────────────────────────────────────────────
-class IncidentState(TypedDict):
-    query: str
-    plan: dict
-    log_findings: dict
-    metrics_findings: dict
-    deployment_findings: dict
-    rca: dict
-    similar_incidents: list
-    final_report: str
-    messages: list[dict]
+# ── Investigation State ─────────────────────────────────────────────────────
+
+class InvestigationState(TypedDict):
+    """
+    Shared state of the IncidentIQ investigation.
+
+    The state represents the knowledge collected during
+    the investigation rather than a fixed sequence of agents.
+    """
+
+    # Original incident reported by the user
+    incident: str
+
+    # Things discovered during the investigation
+    observations: list
+
+    # Evidence collected from investigation tools
+    evidence: list
+
+    # Possible explanations for the incident
+    hypotheses: list
+
+    # Investigation tools/sources already used
+    tools_used: list
+
+    # Information still required
+    evidence_gaps: list
+
+    # Overall investigation confidence
+    confidence: float
+
+    # Why the investigation stopped
+    stop_reason: str
+
+    # Final RCA, solution, actions and prevention
+    final_result: dict
 
 
-# ── Build Graph ──────────────────────────────────────────────────────────────
-def build_workflow() -> StateGraph:
-    graph = StateGraph(IncidentState)
+# ── Orchestrator Node ───────────────────────────────────────────────────────
 
-    # Register nodes
-    graph.add_node("planner", run_planner)
-    graph.add_node("log_agent", run_log_agent)
-    graph.add_node("metrics_agent", run_metrics_agent)
-    graph.add_node("deployment_agent", run_deployment_agent)
-    graph.add_node("rootcause_agent", run_rootcause_agent)
-    graph.add_node("summarizer", run_summarizer)
+def run_orchestrator_node(
+    state: InvestigationState,
+    config=None,
+) -> dict:
+    """
+    Execute the complete IncidentIQ investigation loop.
 
-    # Define edges (sequential pipeline)
-    graph.add_edge(START, "planner")
-    graph.add_edge("planner", "log_agent")
-    graph.add_edge("log_agent", "metrics_agent")
-    graph.add_edge("metrics_agent", "deployment_agent")
-    graph.add_edge("deployment_agent", "rootcause_agent")
-    graph.add_edge("rootcause_agent", "summarizer")
-    graph.add_edge("summarizer", END)
+    The orchestrator internally manages:
+        - Investigation Agent
+        - Dynamic tool selection
+        - Evidence collection
+        - Iterative investigation
+        - Final synthesis
+    """
+
+    incident = state["incident"]
+
+    logger.info(
+        "[Workflow] Starting Investigation Orchestrator..."
+    )
+
+    # ---------------------------------------------------------
+    # Retrieve optional progress callback from LangGraph config
+    # ---------------------------------------------------------
+
+    progress_callback = None
+
+    if config:
+
+        configurable = config.get(
+            "configurable",
+            {}
+        )
+
+        progress_callback = configurable.get(
+            "progress_callback"
+        )
+
+    # ---------------------------------------------------------
+    # Run Investigation Orchestrator
+    # ---------------------------------------------------------
+
+    result = run_investigation_loop(
+        incident=incident,
+        progress_callback=progress_callback,
+    )
+
+    return {
+        "incident": result["incident"],
+        "observations": result["observations"],
+        "evidence": result["evidence"],
+        "hypotheses": result["hypotheses"],
+        "tools_used": result["tools_used"],
+        "evidence_gaps": result["evidence_gaps"],
+        "confidence": result["confidence"],
+        "stop_reason": result["stop_reason"],
+        "final_result": result["final_result"],
+    }
+
+
+# ── Build Graph ─────────────────────────────────────────────────────────────
+
+def build_workflow():
+    """
+    Build the IncidentIQ LangGraph workflow.
+
+    LangGraph is now responsible only for the outer workflow.
+
+    The actual investigation logic is handled by the
+    Investigation Orchestrator.
+    """
+
+    graph = StateGraph(InvestigationState)
+
+    # Single high-level investigation node.
+    graph.add_node(
+        "investigation_orchestrator",
+        run_orchestrator_node
+    )
+
+    graph.add_edge(
+        START,
+        "investigation_orchestrator"
+    )
+
+    graph.add_edge(
+        "investigation_orchestrator",
+        END
+    )
 
     return graph.compile()
 
 
-def run_investigation(query: str, progress_callback=None) -> dict:
+# ── Run Investigation ───────────────────────────────────────────────────────
+
+def run_investigation(
+    query: str,
+    progress_callback=None,
+) -> dict:
     """
-    Run the full incident investigation workflow.
+    Run the complete IncidentIQ investigation workflow.
 
     Args:
-        query: Natural language description of the incident
-        progress_callback: Optional callable(step_name, state) for streaming progress
+        query:
+            Natural-language description of the incident.
+
+        progress_callback:
+            Optional callback receiving:
+                (step_name, current_state)
 
     Returns:
-        Final state with all findings and the markdown report
+        Final investigation state.
     """
-    logger.info(f"Starting incident investigation for: '{query[:80]}'")
+
+    logger.info(
+        f"Starting incident investigation for: '{query[:80]}'"
+    )
 
     workflow = build_workflow()
 
     initial_state = {
-        "query": query,
-        "plan": {},
-        "log_findings": {},
-        "metrics_findings": {},
-        "deployment_findings": {},
-        "rca": {},
-        "similar_incidents": [],
-        "final_report": "",
-        "messages": [],
+        "incident": query,
+        "observations": [],
+        "evidence": [],
+        "hypotheses": [],
+        "tools_used": [],
+        "evidence_gaps": [],
+        "confidence": 0.0,
+        "stop_reason": "max_iterations_reached",
+        "final_result": {},
     }
 
-    steps = [
-        "planner",
-        "log_agent",
-        "metrics_agent",
-        "deployment_agent",
-        "rootcause_agent",
-        "summarizer",
-    ]
-
-    # Stream execution step by step
     final_state = initial_state.copy()
+
+    # ---------------------------------------------------------
+    # LangGraph configuration
+    # ---------------------------------------------------------
+
+    config = {
+        "configurable": {
+            "progress_callback": progress_callback
+        }
+    }
+
     try:
-        for step_output in workflow.stream(initial_state, stream_mode="updates"):
+
+        for step_output in workflow.stream(
+            initial_state,
+            config=config,
+            stream_mode="updates",
+        ):
+
             for node_name, node_state in step_output.items():
+
                 final_state.update(node_state)
-                logger.info(f"✓ Completed node: {node_name}")
+
+                logger.info(
+                    f"✓ Completed node: {node_name}"
+                )
+
+                # LangGraph-level progress notification.
                 if progress_callback:
-                    progress_callback(node_name, final_state)
+
+                    progress_callback(
+                        node_name,
+                        final_state,
+                    )
+
     except Exception as e:
-        logger.error(f"Workflow error: {e}")
+
+        logger.error(
+            f"Workflow error: {e}"
+        )
+
         raise
 
-    logger.info("Investigation complete.")
+    logger.info(
+        "Investigation complete."
+    )
+
     return final_state

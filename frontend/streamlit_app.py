@@ -1,167 +1,323 @@
 """
-Streamlit UI for the Incident AI Investigation Agent.
+IncidentIQ — Streamlit frontend.
 
-Run: streamlit run frontend/streamlit_app.py
-(Make sure backend is running: uvicorn backend.app:app --port 8000)
+Production mode:
+    streamlit run frontend/streamlit_app.py
+    Requires the FastAPI backend on API_BASE (default: http://localhost:8000)
 
-Or run standalone (no backend needed): set STANDALONE=true
+Local standalone mode:
+    Set STANDALONE=true
+    This runs the investigation workflow inside Streamlit for development only.
+
+Developer tools:
+    Set SHOW_DEV_TOOLS=true to show synthetic demo-data seeding controls.
 """
 
-import sys
 import os
-
-# Allow running from repo root or frontend dir
+import sys
+API_KEY = os.getenv("API_KEY", "")
+# -----------------------------------------------------------------------------
+# Paths
+# -----------------------------------------------------------------------------
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND = os.path.join(ROOT, "backend")
-sys.path.insert(0, BACKEND)
-sys.path.insert(0, ROOT)
+
+STANDALONE = os.getenv("STANDALONE", "false").lower() == "true"
+SHOW_DEV_TOOLS = os.getenv("SHOW_DEV_TOOLS", "false").lower() == "true"
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+
+if STANDALONE:
+    sys.path.insert(0, BACKEND)
+    sys.path.insert(0, ROOT)
 
 import streamlit as st
-import json
-import time
 import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime
 
-# Try to import backend directly (standalone mode)
-try:
+if STANDALONE:
     from graph.workflow import run_investigation
     from utils.data_generator import seed_data
-    from utils.parser import load_metrics, summarize_metrics
-    from rag.vectorstore import ingest_historical_incidents
+    from utils.parser import load_metrics
     from config import DATA_DIR
-    STANDALONE = True
-except ImportError:
-    STANDALONE = False
+else:
     import httpx
-    API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 
-# ── Page Config ─────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Page configuration
+# -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="AI Incident Investigator",
-    page_icon="🔍",
+    page_title="IncidentIQ",
+    page_icon="🔎",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ───────────────────────────────────────────────────────────────
-st.markdown("""
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def as_list(value):
+    """Normalize strings, lists and unexpected values for clean rendering."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return [str(value)]
+
+
+def render_bullets(items):
+    """Render a list as clean markdown bullets."""
+    for item in as_list(items):
+        if isinstance(item, dict):
+            text = item.get("text") or item.get("reasoning") or str(item)
+        else:
+            text = str(item)
+        st.markdown(f"- {text}")
+
+
+def confidence_display(confidence):
+    if isinstance(confidence, (int, float)):
+        return f"{confidence:.0%}" if confidence <= 1 else f"{confidence:.0f}%"
+    return str(confidence or "Unknown")
+
+
+def severity_class(severity):
+    value = str(severity or "unknown").lower()
+    if value in {"critical", "high"}:
+        return "severity-high"
+    if value == "medium":
+        return "severity-medium"
+    return "severity-low"
+
+
+def call_backend(method, path, **kwargs):
+    """Call the FastAPI backend with a consistent timeout/error message."""
+
+    try:
+        with httpx.Client(timeout=kwargs.pop("timeout", 60)) as client:
+            response = client.request(
+                method,
+                f"{API_BASE}{path}",
+                **kwargs,
+            )
+
+        response.raise_for_status()
+        return response.json()
+
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Backend request failed: {exc}") from exc
+
+
+def get_metrics_data():
+    if STANDALONE:
+        return load_metrics()
+    data = call_backend("GET","/api/v1/data/metrics",timeout=30,)
+    return data if isinstance(data, list) else []
+
+
+# -----------------------------------------------------------------------------
+# Styling
+# -----------------------------------------------------------------------------
+st.markdown(
+    """
 <style>
+    /* Page rhythm */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        max-width: 1400px;
+    }
+
+    /* Hero */
     .main-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        padding: 2rem;
+        background: linear-gradient(135deg, #171a2b 0%, #20294a 100%);
+        padding: 1.6rem 1.8rem;
+        border-radius: 14px;
+        margin-bottom: 1.4rem;
+        border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .main-header h1 {
+        margin: 0;
+        font-size: 2rem;
+    }
+
+    .main-header p {
+        margin: 0.45rem 0 0;
+        opacity: 0.78;
+        font-size: 1rem;
+    }
+
+    /* Section cards */
+    .root-cause-card {
+        padding: 1.15rem 1.25rem;
+        border: 1px solid rgba(128,128,128,0.25);
         border-radius: 12px;
-        margin-bottom: 1.5rem;
-        color: white;
+        margin: 0.6rem 0 1rem;
     }
-    .agent-card {
-        background: #f8f9fa;
-        border-left: 4px solid #0f3460;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        border-radius: 0 8px 8px 0;
+
+    .severity-badge {
+        display: inline-block;
+        padding: 0.2rem 0.55rem;
+        border-radius: 6px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        margin-left: 0.4rem;
     }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1rem;
-        border-radius: 8px;
-        text-align: center;
+
+    .severity-high {
+        background: rgba(220, 53, 69, 0.16);
+        color: #ff7b87;
     }
-    .confidence-high { color: #28a745; font-weight: bold; font-size: 1.2em; }
-    .confidence-medium { color: #ffc107; font-weight: bold; font-size: 1.2em; }
-    .confidence-low { color: #dc3545; font-weight: bold; font-size: 1.2em; }
-    .stProgress > div > div > div { background-color: #0f3460; }
+
+    .severity-medium {
+        background: rgba(255, 193, 7, 0.16);
+        color: #ffc857;
+    }
+
+    .severity-low {
+        background: rgba(40, 167, 69, 0.16);
+        color: #65d681;
+    }
+
+    .muted {
+        color: #8f96a3;
+        font-size: 0.9rem;
+    }
+
+    /* Reduce visual noise from Streamlit containers */
+    div[data-testid="stMetric"] {
+        padding: 0.7rem 0.8rem;
+        border: 1px solid rgba(128,128,128,0.18);
+        border-radius: 10px;
+    }
+
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.8rem;
+    }
+
+    /* Primary action */
+    div.stButton > button[kind="primary"] {
+        min-height: 3rem;
+        font-weight: 700;
+    }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] .block-container {
+        padding-top: 1.5rem;
+    }
+
+    /* Avoid excessive whitespace around tabs */
+    button[data-baseweb="tab"] {
+        font-weight: 600;
+    }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### 🔍 Incident AI Agent")
-    st.markdown("*Multi-agent RCA powered by LangGraph + Gemini*")
+    st.markdown("## 🔎 IncidentIQ")
+    st.caption("Evidence-driven incident investigation")
     st.divider()
 
-    st.markdown("#### ⚙️ Setup")
-    api_key = st.text_input(
-        "Gemini API Key",
-        type="password",
-        help="Get free key at https://aistudio.google.com/app/apikey",
-        value=os.getenv("GEMINI_API_KEY", ""),
-    )
-    if api_key:
-        os.environ["GEMINI_API_KEY"] = api_key
+    st.markdown("#### 🔐 Security")
+    st.info("Gemini API access is managed by the backend. Secrets are not exposed in the UI.")
 
-    st.divider()
-    st.markdown("#### 📥 Demo Data")
-    if st.button("🌱 Seed Demo Incident Data", use_container_width=True):
-        with st.spinner("Seeding synthetic data..."):
-            try:
-                if STANDALONE:
-                    result = seed_data(DATA_DIR)
-                    count = ingest_historical_incidents(force=True)
-                    st.success(f"✅ Seeded: {result['logs']} logs, {result['metrics']} metrics, "
-                               f"{result['deployments']} deploys, {count} incidents in vectorstore")
-                else:
-                    resp = httpx.post(f"{API_BASE}/seed", json={}, timeout=60)
-                    data = resp.json()
-                    if data.get("success"):
-                        r = data["data"]
-                        st.success(f"✅ Seeded: {r['logs']} logs, {r['metrics']} metrics")
+    if SHOW_DEV_TOOLS:
+        st.divider()
+        st.markdown("#### 🧪 Developer Tools")
+        st.caption("Development-only controls. Keep hidden in production.")
+
+        if st.button("🌱 Seed Demo Incident Data", use_container_width=True):
+            with st.spinner("Seeding synthetic incident data..."):
+                try:
+                    if STANDALONE:
+                        result = seed_data(DATA_DIR)
+                        st.success(
+                            f"Seeded {result['logs']} logs, "
+                            f"{result['metrics']} metrics and "
+                            f"{result['deployments']} deployments."
+                        )
                     else:
-                        st.error("Seed failed")
-            except Exception as e:
-                st.error(f"Error: {e}")
+                        data = call_backend("POST","/api/v1/seed",json={},timeout=60,)
+                        if data.get("success"):
+                            seeded = data.get("result", {})
+                            st.success(
+                                f"Seeded {seeded.get('logs', 0)} logs, "
+                                f"{seeded.get('metrics', 0)} metrics and "
+                                f"{seeded.get('deployments', 0)} deployments."
+                            )
+                        else:
+                            st.error("Demo-data seeding failed.")
+                except Exception as exc:
+                    st.error(str(exc))
 
     st.divider()
-    st.markdown("#### 🏗️ Architecture")
-    st.markdown("""
+    st.markdown("#### 🧭 How IncidentIQ works")
+    st.markdown(
+        """
+```text
+Incident
+   ↓
+Investigation Agent
+   ↓
+Choose evidence source
+   ↓
+Logs / Metrics / Deployments
+   ↓
+Evidence + Hypotheses
+   ↓
+Final Synthesis
+   ↓
+RCA + Solution + Prevention
 ```
-User Query
-    │
-Planner Agent
-    │
-Log Agent
-    │
-Metrics Agent
-    │
-Deployment Agent
-    │
-Historical Incident RAG
-(ChromaDB + MiniLM)
-    │
-Root Cause Agent
-    │
-Final Report
-```
-""")
+"""
+    )
 
     st.divider()
     st.markdown("#### 🛠️ Tech Stack")
-    st.markdown("""
-- 🧠 **Gemini 1.5 Flash** (free tier)
-- 🔗 **LangGraph** multi-agent
-- 📚 **ChromaDB** vectorstore
-- 🤗 **MiniLM-L6-v2** embeddings
-- ⚡ **FastAPI** backend
-- 📊 **DeepEval + RAGAS** evals
-""")
+    st.markdown(
+        """
+- 🧠 **Gemini 3.5 Flash** — reasoning & synthesis
+- 🔗 **LangGraph** — investigation orchestration
+- ⚡ **FastAPI** — backend API
+- 📊 **Plotly** — diagnostics
+- 📚 **RAG / ChromaDB** — historical incidents (extensible)
+- 🧪 **DeepEval + RAGAS** — evaluation
+"""
+    )
+
+    st.caption("Architecture: single Investigation Agent + evidence tools")
 
 
-# ── Main Header ──────────────────────────────────────────────────────────────
-st.markdown("""
+# -----------------------------------------------------------------------------
+# Header
+# -----------------------------------------------------------------------------
+st.markdown(
+    """
 <div class="main-header">
-    <h1 style="margin:0; font-size:2em;">🔍 AI Incident Investigation Agent</h1>
-    <p style="margin:0.5rem 0 0 0; opacity:0.8;">
-        Production-grade multi-agent system for automated Root Cause Analysis
-    </p>
+    <h1>🔎 IncidentIQ</h1>
+    <p>Investigate production incidents, correlate evidence, and generate an explainable RCA.</p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
-# ── Query Input ──────────────────────────────────────────────────────────────
-st.markdown("### 📝 Describe the Incident")
+# -----------------------------------------------------------------------------
+# Incident input
+# -----------------------------------------------------------------------------
+st.markdown("### 📝 Describe the incident")
 
 example_queries = [
     "Checkout latency increased 10x after deployment v3.8. CPU and memory are normal but error rate jumped to 8%.",
@@ -170,323 +326,403 @@ example_queries = [
     "Notification service dropped 15000 messages after migrating from SQS to Kafka.",
 ]
 
-col1, col2 = st.columns([3, 1])
+col1, col2 = st.columns([3.2, 1])
+
 with col1:
     query = st.text_area(
         "Incident Query",
-        placeholder="e.g. Checkout latency spiked after deployment v3.8. Error rate went from 0.3% to 8.5%...",
-        height=100,
+        value=st.session_state.get("query_val", ""),
+        placeholder="Describe what happened, when it started, and any symptoms you observed...",
+        height=120,
         label_visibility="collapsed",
     )
-with col2:
-    st.markdown("**Quick examples:**")
-    for i, ex in enumerate(example_queries):
-        if st.button(f"Example {i+1}", key=f"ex_{i}", use_container_width=True):
-            st.session_state["query_val"] = ex
-            st.rerun()
 
-# Apply example query if selected
-if "query_val" in st.session_state and not query:
-    query = st.session_state["query_val"]
+with col2:
+    st.markdown("**Quick examples**")
+    for i, example in enumerate(example_queries):
+        if st.button(f"Example {i + 1}", key=f"example_{i}", use_container_width=True):
+            st.session_state["query_val"] = example
+            st.rerun()
 
 run_btn = st.button(
     "🚀 Investigate Incident",
     type="primary",
     use_container_width=True,
-    disabled=not query or not api_key,
+    disabled=not query.strip(),
 )
 
-if not api_key:
-    st.warning("⚠️ Add your Gemini API key in the sidebar to start (it's free!)")
 
-# ── Tabs ─────────────────────────────────────────────────────────────────────
-tab_report, tab_agents, tab_metrics, tab_raw = st.tabs([
-    "📋 Investigation Report",
-    "🤖 Agent Trail",
-    "📊 Metrics Dashboard",
-    "🔩 Raw Data",
-])
+# -----------------------------------------------------------------------------
+# Result tabs
+# -----------------------------------------------------------------------------
+tab_report, tab_evidence, tab_trace, tab_diagnostics = st.tabs(
+    [
+        "📋 Report",
+        "🔍 Evidence",
+        "🧠 Investigation Trace",
+        "📊 Diagnostics",
+    ]
+)
 
-# ── Investigation Execution ──────────────────────────────────────────────────
-if run_btn and query and api_key:
-    # Progress tracking
+
+# -----------------------------------------------------------------------------
+# Investigation execution
+# -----------------------------------------------------------------------------
+if run_btn and query.strip():
     progress_container = st.container()
+
     with progress_container:
-        st.markdown("### ⚙️ Investigation in progress...")
+        st.markdown("### ⚙️ Investigation in progress")
         progress_bar = st.progress(0)
         status_text = st.empty()
+        trail_container = st.empty()
+        progress_steps = []
 
-        agent_steps = [
-            ("planner", "📋 Planning investigation..."),
-            ("log_agent", "📄 Analyzing application logs..."),
-            ("metrics_agent", "📊 Detecting metric anomalies..."),
-            ("deployment_agent", "🚀 Correlating deployments..."),
-            ("rootcause_agent", "🧠 Synthesizing root cause..."),
-            ("summarizer", "📝 Generating final report..."),
-        ]
+        status_text.markdown("**🧠 Investigation Agent is analyzing the incident...**")
 
-        step_containers = {}
-        for step_id, step_label in agent_steps:
-            step_containers[step_id] = st.empty()
-            step_containers[step_id].markdown(f"⏳ {step_label}")
+    def render_live_trail():
+        if progress_steps:
+            trail_container.markdown(
+                "#### Investigation Trail\n\n"
+                + "\n\n".join(f"✅ {step}" for step in progress_steps)
+            )
 
-    # Track progress via callback
-    completed_steps = []
+    def progress_callback(step_name: str, state: dict):
+        iteration = state.get("iteration", len(progress_steps) + 1)
 
-    def progress_callback(node_name: str, state: dict):
-        idx = [s[0] for s in agent_steps].index(node_name) if node_name in [s[0] for s in agent_steps] else 0
-        progress = (idx + 1) / len(agent_steps)
-        progress_bar.progress(progress)
-        label = next((s[1] for s in agent_steps if s[0] == node_name), node_name)
-        status_text.markdown(f"**✅ {label}**")
-        step_containers[node_name].markdown(f"✅ {label}")
-        completed_steps.append(node_name)
+        tool_labels = {
+            "query_logs": "📄 Querying application logs...",
+            "query_metrics": "📊 Analyzing service metrics...",
+            "get_deployments": "🚀 Checking deployment history...",
+            "inspect_api": "🌐 Inspecting API traffic...",
+            "inspect_database": "🗄️ Inspecting database health...",
+            "inspect_infrastructure": "🏗️ Inspecting infrastructure...",
+            "inspect_security": "🔐 Inspecting security signals...",
+            "search_historical_incidents": "📚 Searching historical incidents...",
+        }
+
+        if step_name == "investigation":
+            status_text.markdown(
+                f"**🧠 Investigation Agent — deciding what to investigate next "
+                f"(iteration {iteration})...**"
+            )
+            progress_steps.append(f"Investigation Agent — iteration {iteration}")
+
+        elif step_name in tool_labels:
+            status_text.markdown(f"**{tool_labels[step_name]}**")
+            progress_steps.append(f"{step_name}()")
+
+        elif step_name == "synthesis":
+            status_text.markdown("**📝 Synthesizing root cause, solution and prevention...**")
+            progress_steps.append("Final synthesis")
+
+        elif step_name == "investigation_orchestrator":
+            status_text.markdown("**✅ Investigation workflow completed**")
+
+        progress_bar.progress(min(0.95, 0.10 + len(progress_steps) * 0.12))
+        render_live_trail()
 
     try:
-        with st.spinner(""):
-            if STANDALONE:
-                state = run_investigation(query, progress_callback=progress_callback)
-            else:
-                resp = httpx.post(
-                    f"{API_BASE}/investigate",
-                    json={"query": query},
-                    timeout=300,
-                )
-                result = resp.json()
-                if not result.get("success"):
-                    st.error(f"Investigation failed: {result}")
-                    st.stop()
-                state = result
-                # Mark all steps done
-                for step_id, label in agent_steps:
-                    step_containers[step_id].markdown(f"✅ {label}")
-                progress_bar.progress(1.0)
+        if STANDALONE:
+            state = run_investigation(query.strip(), progress_callback=progress_callback)
+        else:
+            result = call_backend(
+                "POST",
+                "/api/v1/incidents/investigate",
+                json={"query": query.strip()},
+                headers={"X-API-Key": API_KEY},
+                timeout=300,
+            )
+            if not result.get("success"):
+                raise RuntimeError(f"Investigation failed: {result}")
+            state = result
 
+        progress_bar.progress(1.0)
+        status_text.markdown("**✅ Investigation complete — final RCA generated.**")
         progress_container.empty()
+
         st.session_state["last_state"] = state
-        st.success("✅ Investigation complete!")
+        st.session_state["query_val"] = query.strip()
+        st.rerun()
 
-    except Exception as e:
-        st.error(f"❌ Investigation failed: {e}")
-        st.exception(e)
-        st.stop()
+    except Exception as exc:
+        progress_container.empty()
+        st.error(f"❌ Investigation failed: {exc}")
+        st.exception(exc)
 
-# ── Display Results ──────────────────────────────────────────────────────────
+
+# -----------------------------------------------------------------------------
+# Display latest investigation
+# -----------------------------------------------------------------------------
 state = st.session_state.get("last_state", {})
 
 if state:
-    rca = state.get("rca", {})
-    plan = state.get("plan", {})
-    log_findings = state.get("log_findings", {})
-    metrics_findings = state.get("metrics_findings", {})
-    deployment_findings = state.get("deployment_findings", {})
-    similar = state.get("similar_incidents", [])
-    messages = state.get("messages", [])
+    observations = as_list(state.get("observations", []))
+    evidence = as_list(state.get("evidence", []))
+    hypotheses = as_list(state.get("hypotheses", []))
+    tools_used = as_list(state.get("tools_used", []))
+    evidence_gaps = as_list(state.get("evidence_gaps", []))
+    confidence = state.get("confidence", 0)
+    final_result = state.get("final_result") or {}
 
-    # ── Top KPI Row ──────────────────────────────────────────────────────────
-    root_cause_data = rca.get("root_cause", {})
-    confidence = root_cause_data.get("confidence_pct", 0)
-    metrics_raw = metrics_findings.get("raw_summary", {})
-
+    # -------------------------------------------------------------------------
+    # KPI row
+    # -------------------------------------------------------------------------
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+
     with kpi1:
-        conf_class = "confidence-high" if confidence >= 85 else ("confidence-medium" if confidence >= 65 else "confidence-low")
-        st.metric("🎯 Confidence", f"{confidence}%")
+        st.metric("🎯 Confidence", confidence_display(confidence))
+
     with kpi2:
-        st.metric("⚡ Latency P99 (max)", f"{metrics_raw.get('latency_p99_max_ms', 'N/A')} ms")
+        st.metric("🛠️ Tools Used", len(tools_used))
+
     with kpi3:
-        st.metric("🔴 Error Rate (max)", f"{metrics_raw.get('error_rate_max_pct', 'N/A')}%")
+        st.metric("🔍 Evidence", len(evidence))
+
     with kpi4:
-        suspect = deployment_findings.get("suspect_deployment", {})
-        st.metric("🚀 Suspect Deploy", suspect.get("version", "N/A"))
+        st.metric("⚠️ Evidence Gaps", len(evidence_gaps))
 
     st.divider()
 
-    # ── Tab: Report ──────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
+    # Report
+    # -------------------------------------------------------------------------
     with tab_report:
-        report = state.get("final_report", "")
-        if report:
-            st.markdown(report)
-        else:
-            st.info("Run an investigation to see the report.")
+        st.markdown("### 📋 Investigation Report")
 
-    # ── Tab: Agent Trail ─────────────────────────────────────────────────────
-    with tab_agents:
-        st.markdown("### 🤖 Multi-Agent Investigation Trail")
+        if final_result:
+            root_cause = final_result.get("probable_root_cause", "")
+            severity = final_result.get("severity", "")
+            solution = final_result.get("probable_solution", "")
+            actions = final_result.get("immediate_actions", [])
+            prevention = final_result.get("long_term_prevention", [])
+            supporting = final_result.get("supporting_evidence", [])
+            alternatives = final_result.get("alternative_hypotheses", [])
 
-        agent_colors = {
-            "planner": "#3498db",
-            "log_agent": "#e74c3c",
-            "metrics_agent": "#9b59b6",
-            "deployment_agent": "#e67e22",
-            "rootcause_agent": "#27ae60",
-            "summarizer": "#1abc9c",
-        }
+            if root_cause:
+                severity_html = ""
+                if severity:
+                    severity_html = (
+                        f'<span class="severity-badge {severity_class(severity)}">'
+                        f"{str(severity).upper()}</span>"
+                    )
 
-        agent_icons = {
-            "planner": "📋",
-            "log_agent": "📄",
-            "metrics_agent": "📊",
-            "deployment_agent": "🚀",
-            "rootcause_agent": "🧠",
-            "summarizer": "📝",
-        }
+                st.markdown(
+                    f"""
+<div class="root-cause-card">
+    <div class="muted">PROBABLE ROOT CAUSE {severity_html}</div>
+    <div style="font-size:1.25rem; font-weight:700; margin-top:0.55rem;">
+        {root_cause}
+    </div>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
 
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            color = agent_colors.get(role, "#95a5a6")
-            icon = agent_icons.get(role, "🤖")
-            label = role.replace("_", " ").title()
-            st.markdown(
-                f"""<div style="border-left: 4px solid {color}; padding: 0.75rem 1rem; 
-                margin: 0.4rem 0; border-radius: 0 8px 8px 0; background: #f8f9fa;">
-                <strong>{icon} {label}</strong><br/><span style="color:#555">{content}</span>
-                </div>""",
-                unsafe_allow_html=True,
+            if supporting:
+                st.markdown("#### 🔍 Why IncidentIQ believes this")
+                render_bullets(supporting)
+
+            if solution:
+                st.markdown("#### 🛠️ Probable Solution")
+                if isinstance(solution, (list, tuple)):
+                    render_bullets(solution)
+                else:
+                    st.info(str(solution))
+
+            if actions:
+                st.markdown("#### ⚡ Immediate Actions")
+                render_bullets(actions)
+
+            if prevention:
+                st.markdown("#### 🛡️ Long-Term Prevention")
+                render_bullets(prevention)
+
+            if alternatives:
+                with st.expander("🔄 Alternative hypotheses"):
+                    for item in as_list(alternatives):
+                        if isinstance(item, dict):
+                            st.markdown(
+                                f"- **{item.get('hypothesis', 'Unknown')}** — "
+                                f"{item.get('reasoning', '')}"
+                            )
+                        else:
+                            st.markdown(f"- {item}")
+
+            st.caption(
+                "RCA is the most likely explanation supported by the available evidence; "
+                "it does not automatically prove causality."
             )
+        else:
+            st.info("The investigation completed without a final synthesis.")
 
-        st.divider()
+    # -------------------------------------------------------------------------
+    # Evidence
+    # -------------------------------------------------------------------------
+    with tab_evidence:
+        st.markdown("### 🔍 Collected Evidence")
+        st.caption("Detailed evidence collected by the investigation tools.")
 
-        # Show plan
-        if plan:
-            with st.expander("📋 Investigation Plan (Planner Agent)"):
-                st.json(plan)
+        if evidence:
+            for i, item in enumerate(evidence, 1):
+                with st.expander(f"Evidence {i}", expanded=(i <= 3)):
+                    if isinstance(item, dict):
+                        st.json(item)
+                    else:
+                        st.write(item)
+        else:
+            st.info("No evidence was collected.")
 
-        # Show hypotheses
-        alt_hypotheses = rca.get("alternative_hypotheses", [])
-        if alt_hypotheses:
-            with st.expander("🔄 Alternative Hypotheses"):
-                for h in alt_hypotheses:
-                    likelihood = h.get("likelihood", "unknown")
-                    color = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(likelihood, "⚪")
-                    st.markdown(f"**{color} {h.get('hypothesis')}** — `{likelihood}` likelihood")
-                    st.markdown(f"> {h.get('reasoning', '')}")
+    # -------------------------------------------------------------------------
+    # Investigation trace
+    # -------------------------------------------------------------------------
+    with tab_trace:
+        st.markdown("### 🧠 Investigation Trace")
+        st.caption("How the Investigation Agent selected evidence sources during this run.")
 
-        # Similar incidents
-        if similar:
-            with st.expander(f"📚 Similar Historical Incidents ({len(similar)} found via RAG)"):
-                for inc in similar:
-                    m = inc.get("metadata", {})
-                    similarity = inc.get("similarity_score", 0)
-                    bar = "█" * int(similarity * 10) + "░" * (10 - int(similarity * 10))
-                    st.markdown(f"**{m.get('title')}** ({m.get('date')})")
-                    st.markdown(f"Similarity: `{bar}` {similarity:.0%}")
-                    with st.expander("Full document"):
-                        st.text(inc.get("document", ""))
+        if tools_used:
+            for i, tool in enumerate(tools_used, 1):
+                st.markdown(f"**{i}.** `{tool}()`")
+        else:
+            st.info("No investigation tools were recorded.")
 
-    # ── Tab: Metrics Dashboard ───────────────────────────────────────────────
-    with tab_metrics:
-        st.markdown("### 📊 Live Metrics Dashboard")
+        if observations:
+            st.divider()
+            st.markdown("#### 👀 Key Observations")
+            render_bullets(observations)
 
-        # Load raw metrics for charts
+        if hypotheses:
+            st.divider()
+            st.markdown("#### 💡 Hypotheses")
+            render_bullets(hypotheses)
+
+        if evidence_gaps:
+            st.divider()
+            st.markdown("#### ⚠️ Evidence Gaps")
+            for gap in evidence_gaps:
+                st.warning(str(gap))
+
+    # -------------------------------------------------------------------------
+    # Diagnostics
+    # -------------------------------------------------------------------------
+    with tab_diagnostics:
+        st.markdown("### 📊 Diagnostics")
+        st.caption("Operational metrics available to support the investigation.")
+
         try:
-            if STANDALONE:
-                metrics_data = load_metrics()
-            else:
-                resp = httpx.get(f"{API_BASE}/data/metrics", timeout=30)
-                metrics_data = resp.json()
-        except Exception:
+            metrics_data = get_metrics_data()
+        except Exception as exc:
             metrics_data = []
+            st.warning(f"Could not load metrics: {exc}")
 
         if metrics_data:
-            timestamps = [m["timestamp"][:16] for m in metrics_data]
-            latency = [m["latency_p99_ms"] for m in metrics_data]
-            errors = [m["error_rate_pct"] for m in metrics_data]
-            db_conn = [m["db_connection_pool_pct"] for m in metrics_data]
-            cpu = [m["cpu_pct"] for m in metrics_data]
+            timestamps = [str(m.get("timestamp", ""))[:16] for m in metrics_data]
+            latency = [m.get("latency_p99_ms", 0) for m in metrics_data]
+            errors = [m.get("error_rate_pct", 0) for m in metrics_data]
+            db_conn = [m.get("db_connection_pool_pct", 0) for m in metrics_data]
+            cpu = [m.get("cpu_pct", 0) for m in metrics_data]
 
-            # Chart 1: Latency
             fig_latency = go.Figure()
-            fig_latency.add_trace(go.Scatter(
-                x=timestamps, y=latency, mode="lines+markers",
-                name="Latency P99 (ms)", line=dict(color="#e74c3c", width=2),
-                fill="tozeroy", fillcolor="rgba(231,76,60,0.1)",
-            ))
-            fig_latency.add_hline(y=2000, line_dash="dash", line_color="orange",
-                                  annotation_text="Alert threshold (2000ms)")
+            fig_latency.add_trace(
+                go.Scatter(
+                    x=timestamps,
+                    y=latency,
+                    mode="lines+markers",
+                    name="P99 latency",
+                )
+            )
+            fig_latency.add_hline(
+                y=2000,
+                line_dash="dash",
+                annotation_text="Alert: 2000 ms",
+            )
             fig_latency.update_layout(
-                title="Latency P99 over time",
+                title="P99 Latency",
                 xaxis_title="Time",
-                yaxis_title="ms",
-                height=300,
-                margin=dict(t=40, b=20),
+                yaxis_title="Milliseconds",
+                height=320,
+                margin=dict(t=55, b=35, l=45, r=20),
             )
             st.plotly_chart(fig_latency, use_container_width=True)
 
-            col1, col2 = st.columns(2)
-            with col1:
-                # Chart 2: Error Rate
+            c1, c2 = st.columns(2)
+
+            with c1:
                 fig_err = go.Figure()
-                fig_err.add_trace(go.Scatter(
-                    x=timestamps, y=errors, mode="lines",
-                    name="Error Rate %", line=dict(color="#9b59b6", width=2),
-                    fill="tozeroy", fillcolor="rgba(155,89,182,0.1)",
-                ))
-                fig_err.add_hline(y=2.0, line_dash="dash", line_color="red",
-                                  annotation_text="Alert (2%)")
-                fig_err.update_layout(title="Error Rate %", height=260, margin=dict(t=40, b=20))
+                fig_err.add_trace(
+                    go.Scatter(x=timestamps, y=errors, mode="lines", name="Error rate")
+                )
+                fig_err.add_hline(
+                    y=2.0,
+                    line_dash="dash",
+                    annotation_text="Alert: 2%",
+                )
+                fig_err.update_layout(
+                    title="Error Rate",
+                    xaxis_title="Time",
+                    yaxis_title="Percent",
+                    height=280,
+                    margin=dict(t=55, b=35, l=45, r=20),
+                )
                 st.plotly_chart(fig_err, use_container_width=True)
 
-            with col2:
-                # Chart 3: DB Connection Pool
+            with c2:
                 fig_db = go.Figure()
-                fig_db.add_trace(go.Scatter(
-                    x=timestamps, y=db_conn, mode="lines",
-                    name="DB Pool %", line=dict(color="#e67e22", width=2),
-                    fill="tozeroy", fillcolor="rgba(230,126,34,0.1)",
-                ))
-                fig_db.add_hline(y=80, line_dash="dash", line_color="red",
-                                 annotation_text="Saturation (80%)")
-                fig_db.update_layout(title="DB Connection Pool %", height=260, margin=dict(t=40, b=20))
+                fig_db.add_trace(
+                    go.Scatter(x=timestamps, y=db_conn, mode="lines", name="DB pool")
+                )
+                fig_db.add_hline(
+                    y=80,
+                    line_dash="dash",
+                    annotation_text="Saturation: 80%",
+                )
+                fig_db.update_layout(
+                    title="DB Connection Pool",
+                    xaxis_title="Time",
+                    yaxis_title="Percent",
+                    height=280,
+                    margin=dict(t=55, b=35, l=45, r=20),
+                )
                 st.plotly_chart(fig_db, use_container_width=True)
 
-            # Chart 4: CPU
             fig_cpu = go.Figure()
-            fig_cpu.add_trace(go.Bar(
-                x=timestamps[::4], y=cpu[::4],
-                name="CPU %", marker_color="#3498db",
-            ))
-            fig_cpu.update_layout(title="CPU Usage %", height=200, margin=dict(t=40, b=20))
+            fig_cpu.add_trace(
+                go.Bar(
+                    x=timestamps[::4],
+                    y=cpu[::4],
+                    name="CPU",
+                )
+            )
+            fig_cpu.update_layout(
+                title="CPU Usage",
+                xaxis_title="Time",
+                yaxis_title="Percent",
+                height=250,
+                margin=dict(t=55, b=35, l=45, r=20),
+            )
             st.plotly_chart(fig_cpu, use_container_width=True)
-
         else:
-            st.info("Seed demo data first to see metrics charts.")
-
-    # ── Tab: Raw Data ────────────────────────────────────────────────────────
-    with tab_raw:
-        st.markdown("### 🔩 Raw Agent Findings")
-
-        with st.expander("📄 Log Agent Findings"):
-            st.json(log_findings)
-        with st.expander("📊 Metrics Agent Findings"):
-            st.json(metrics_findings)
-        with st.expander("🚀 Deployment Agent Findings"):
-            st.json(deployment_findings)
-        with st.expander("🧠 Root Cause (full JSON)"):
-            st.json(rca)
+            st.info("No metrics are available yet. Seed demo data in developer mode or connect a metrics source.")
 
 else:
+    # -------------------------------------------------------------------------
+    # Empty state
+    # -------------------------------------------------------------------------
     with tab_report:
-        st.markdown("""
-        ### 👋 Welcome to AI Incident Investigator
+        st.markdown("### 👋 Start an investigation")
+        st.markdown(
+            """
+IncidentIQ investigates an incident by selecting the most useful evidence source,
+collecting observations, and then synthesizing a probable root cause.
 
-        This tool uses a **multi-agent LangGraph pipeline** to automatically investigate
-        production incidents by analyzing logs, metrics, and deployment history.
+**Typical investigation flow**
 
-        **To get started:**
-        1. Add your **Gemini API key** in the sidebar (free at [aistudio.google.com](https://aistudio.google.com/app/apikey))
-        2. Click **🌱 Seed Demo Incident Data** to load synthetic data
-        3. Type or select an incident query
-        4. Click **🚀 Investigate Incident**
+1. Describe the incident and symptoms.
+2. The Investigation Agent chooses what to inspect next.
+3. Evidence is collected from available tools such as logs, metrics and deployments.
+4. IncidentIQ correlates the evidence and produces an RCA.
+5. The report provides a probable solution, immediate actions and prevention steps.
+"""
+        )
 
-        **What the agents do:**
-        | Agent | Role |
-        |-------|------|
-        | 📋 Planner | Analyzes your query, creates investigation plan |
-        | 📄 Log Agent | Scans error logs, identifies patterns |
-        | 📊 Metrics Agent | Detects latency/error/resource anomalies |
-        | 🚀 Deployment Agent | Correlates deployments with incident timeline |
-        | 🧠 Root Cause Agent | Synthesizes findings + RAG historical search |
-        | 📝 Summarizer | Generates final markdown RCA report |
-        """)
+        st.info("💡 Start with a specific symptom, such as increased latency, elevated errors, or a failure after deployment.")

@@ -7,112 +7,105 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import uuid
+from api.observability import router as observability_router
+from contextvars import ContextVar
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from loguru import logger
-from datetime import datetime
+from config import (
+    API_HOST,
+    API_PORT,
+    API_RELOAD,
+    CORS_ALLOWED_ORIGINS,
+)
+from api.incidents import router as incidents_router
+from api.data import router as data_router
+from api.health import router as health_router
+from api.root import router as root_router
+from api.seed import router as seed_router
 
-from graph.workflow import run_investigation
-from rag.vectorstore import ingest_historical_incidents
-from utils.data_generator import seed_data
-from utils.parser import load_logs, load_metrics, load_deployments, summarize_logs, summarize_metrics, summarize_deployments
-from config import DATA_DIR
+request_id_context: ContextVar[str] = ContextVar(
+    "request_id",
+    default="",
+)
+
 
 app = FastAPI(
-    title="Incident AI Agent API",
-    description="Multi-agent incident investigation using LangGraph + Gemini + ChromaDB",
+    title="IncidentIQ API",
+    description=(
+        "Evidence-driven incident investigation using a single "
+        "Investigation Agent, specialized investigation tools, "
+        "Gemini, and historical incident retrieval."
+    ),
     version="1.0.0",
+)
+
+app.include_router(
+    observability_router
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+import time
+@app.middleware("http")
+async def log_requests(request, call_next):
+    start_time = time.perf_counter()
 
-# ── Request/Response Models ─────────────────────────────────────────────────
-class InvestigationRequest(BaseModel):
-    query: str
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    request_id_context.set(request_id)
 
+    response = await call_next(request)
 
-class SeedRequest(BaseModel):
-    incident_time: str | None = None  # ISO format, optional
+    duration = time.perf_counter() - start_time
 
+    response.headers["X-Request-ID"] = request_id
 
-# ── Routes ──────────────────────────────────────────────────────────────────
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+    logger.info(
+        f"request_id={request_id} "
+        f"{request.method} {request.url.path} "
+        f"→ {response.status_code} "
+        f"({duration:.3f}s)"
+    )
 
+    return response
 
-@app.post("/seed")
-def seed_demo_data(request: SeedRequest = SeedRequest()):
-    """Seed synthetic incident data and ingest into vector store."""
-    try:
-        incident_time = None
-        if request.incident_time:
-            incident_time = datetime.fromisoformat(request.incident_time)
+@app.exception_handler(Exception)
+async def handle_unexpected_error(
+    request: Request,
+    exc: Exception,
+):
+    logger.exception(
+        f"Unhandled API error: {request.method} {request.url.path}"
+    )
 
-        result = seed_data(DATA_DIR, incident_time)
-        count = ingest_historical_incidents(force=True)
-        result["vectorstore_count"] = count
-        return {"success": True, "data": result}
-    except Exception as e:
-        logger.error(f"Seed failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": "Internal server error.",
+        },
+    )
 
-
-@app.post("/investigate")
-def investigate(request: InvestigationRequest):
-    """
-    Run the full multi-agent incident investigation workflow.
-    Returns: complete state with RCA, report, and agent findings.
-    """
-    if not request.query.strip():
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-
-    try:
-        state = run_investigation(request.query)
-        return {
-            "success": True,
-            "query": request.query,
-            "plan": state.get("plan", {}),
-            "log_findings": state.get("log_findings", {}),
-            "metrics_findings": state.get("metrics_findings", {}),
-            "deployment_findings": state.get("deployment_findings", {}),
-            "rca": state.get("rca", {}),
-            "similar_incidents": state.get("similar_incidents", []),
-            "final_report": state.get("final_report", ""),
-            "messages": state.get("messages", []),
-        }
-    except Exception as e:
-        logger.error(f"Investigation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/data/overview")
-def data_overview():
-    """Return a summary of the current data state."""
-    logs = load_logs()
-    metrics = load_metrics()
-    deployments = load_deployments()
-
-    return {
-        "logs": summarize_logs(logs) if logs else {"count": 0},
-        "metrics": summarize_metrics(metrics) if metrics else {"count": 0},
-        "deployments": summarize_deployments(deployments) if deployments else {"count": 0},
-    }
-
-
-@app.get("/data/metrics")
-def get_metrics():
-    """Return raw metrics for charting in the UI."""
-    return load_metrics()
-
+app.include_router(incidents_router)
+app.include_router(data_router)
+app.include_router(health_router)
+app.include_router(root_router)
+app.include_router(seed_router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+
+    uvicorn.run(
+    app,
+    host=API_HOST,
+    port=API_PORT,
+    reload=API_RELOAD,
+)

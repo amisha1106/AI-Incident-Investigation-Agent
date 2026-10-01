@@ -5,10 +5,9 @@ Uses all-MiniLM-L6-v2 embeddings (free, local, no API calls).
 
 import json
 import chromadb
-from chromadb.utils import embedding_functions
 from pathlib import Path
 from loguru import logger
-from config import CHROMA_DB_PATH, INCIDENTS_DIR, RAG_COLLECTION_NAME, RAG_TOP_K, EMBEDDING_MODEL
+from config import CHROMA_DB_PATH, INCIDENTS_DIR, RAG_COLLECTION_NAME, RAG_TOP_K
 
 
 def _build_incident_document(incident: dict) -> str:
@@ -31,13 +30,8 @@ def get_vectorstore() -> chromadb.Collection:
     CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
 
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBEDDING_MODEL
-    )
-
     collection = client.get_or_create_collection(
         name=RAG_COLLECTION_NAME,
-        embedding_function=ef,
         metadata={"hnsw:space": "cosine"},
     )
     return collection
