@@ -6,6 +6,7 @@ import json
 import time
 
 from infrastructure.redis_client import get_redis
+
 from config import (
     JOB_TTL_SECONDS,
     WORKER_JOB_TIMEOUT,
@@ -24,10 +25,15 @@ def _job_key(job_id: str) -> str:
 def create_job(
     job_id: str,
     query: str,
+    request_id: str | None = None,
 ) -> dict:
+    """
+    Create and enqueue a background investigation job.
+    """
 
     job = {
         "job_id": job_id,
+        "request_id": request_id,
         "status": "queued",
         "query": query,
         "created_at": time.time(),

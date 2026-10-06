@@ -31,6 +31,7 @@ AVAILABLE_TOOLS = [
     "inspect_infrastructure",
     "inspect_security",
     "search_historical_incidents",
+    "search_recent_commits",
 ]
 
 def _is_incident_evidence_aligned(
@@ -909,6 +910,43 @@ def _select_fallback_tool(
         ]
     ).lower()
 
+    code_change_keywords = [
+        "code change",
+        "code changes",
+        "recent change",
+        "recent changes",
+        "recent commit",
+        "recent commits",
+        "commit",
+        "commits",
+        "regression",
+        "bug introduced",
+        "new feature",
+        "configuration change",
+        "config change",
+        "after a code change",
+    ]
+
+    if (
+        "search_recent_commits" in unused_tools
+        and any(
+            keyword in signal_text
+            for keyword in code_change_keywords
+        )
+    ):
+        return {
+            "next_action": "search_recent_commits",
+            "reason": (
+                "The incident or investigation state indicates a "
+                "potential recent code or configuration change."
+            ),
+            "investigation_question": (
+                "Are recent GitHub commits temporally or technically "
+                "relevant to the incident?"
+            ),
+            "confidence": "medium",
+        }
+
     # ---------------------------------------------------------
     # Score each unused tool based on the evidence currently
     # available.
@@ -1466,6 +1504,7 @@ You have access to these investigation tools:
 - inspect_infrastructure
 - inspect_security
 - search_historical_incidents
+- search_recent_commits
 
 You may also decide:
 

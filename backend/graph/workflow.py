@@ -13,7 +13,7 @@ Current architecture:
 
 The orchestrator internally handles:
 
-    Investigation Agent
+    Investigation Agent 
           ↓
       Tool Selection
           ↓
@@ -34,26 +34,30 @@ from loguru import logger
 from agents.orchestrator import run_investigation_loop
 
 
-# ── Investigation State ─────────────────────────────────────────────────────
-
 class InvestigationState(TypedDict):
     """
     Shared state of the IncidentIQ investigation.
-
-    The state represents the knowledge collected during
-    the investigation rather than a fixed sequence of agents.
     """
 
-    # Original incident reported by the user
+    # API request correlation identifier
+    request_id: str | None
+
+    # Background job identifier
+    job_id: str | None
+
+    # Unique investigation identifier
+    investigation_id: str
+
+    # Original incident
     incident: str
 
-    # Things discovered during the investigation
+    # Things discovered
     observations: list
 
-    # Evidence collected from investigation tools
+    # Evidence collected
     evidence: list
 
-    # Possible explanations for the incident
+    # Possible explanations
     hypotheses: list
 
     # Investigation tools/sources already used
@@ -65,14 +69,12 @@ class InvestigationState(TypedDict):
     # Overall investigation confidence
     confidence: float
 
-    # Why the investigation stopped
+    # Why investigation stopped
     stop_reason: str
 
     # Final RCA, solution, actions and prevention
     final_result: dict
 
-
-# ── Orchestrator Node ───────────────────────────────────────────────────────
 
 def run_orchestrator_node(
     state: InvestigationState,
@@ -80,13 +82,6 @@ def run_orchestrator_node(
 ) -> dict:
     """
     Execute the complete IncidentIQ investigation loop.
-
-    The orchestrator internally manages:
-        - Investigation Agent
-        - Dynamic tool selection
-        - Evidence collection
-        - Iterative investigation
-        - Final synthesis
     """
 
     incident = state["incident"]
@@ -96,7 +91,7 @@ def run_orchestrator_node(
     )
 
     # ---------------------------------------------------------
-    # Retrieve optional progress callback from LangGraph config
+    # Retrieve optional progress callback
     # ---------------------------------------------------------
 
     progress_callback = None
@@ -113,15 +108,40 @@ def run_orchestrator_node(
         )
 
     # ---------------------------------------------------------
+    # Correlation identifiers
+    # ---------------------------------------------------------
+
+    request_id = state.get(
+        "request_id"
+    )
+
+    job_id = state.get(
+        "job_id"
+    )
+
+    # ---------------------------------------------------------
     # Run Investigation Orchestrator
     # ---------------------------------------------------------
 
     result = run_investigation_loop(
         incident=incident,
         progress_callback=progress_callback,
+        request_id=request_id,
+        job_id=job_id,
     )
 
     return {
+        "request_id": result.get(
+            "request_id",
+            request_id,
+        ),
+        "job_id": result.get(
+            "job_id",
+            job_id,
+        ),
+        "investigation_id": result[
+            "investigation_id"
+        ],
         "incident": result["incident"],
         "observations": result["observations"],
         "evidence": result["evidence"],
@@ -134,44 +154,41 @@ def run_orchestrator_node(
     }
 
 
-# ── Build Graph ─────────────────────────────────────────────────────────────
-
 def build_workflow():
     """
     Build the IncidentIQ LangGraph workflow.
 
-    LangGraph is now responsible only for the outer workflow.
+    LangGraph is responsible only for the outer workflow.
 
-    The actual investigation logic is handled by the
+    Investigation logic is handled by the
     Investigation Orchestrator.
     """
 
     graph = StateGraph(InvestigationState)
 
-    # Single high-level investigation node.
     graph.add_node(
         "investigation_orchestrator",
-        run_orchestrator_node
+        run_orchestrator_node,
     )
 
     graph.add_edge(
         START,
-        "investigation_orchestrator"
+        "investigation_orchestrator",
     )
 
     graph.add_edge(
         "investigation_orchestrator",
-        END
+        END,
     )
 
     return graph.compile()
 
 
-# ── Run Investigation ───────────────────────────────────────────────────────
-
 def run_investigation(
     query: str,
     progress_callback=None,
+    request_id: str | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """
     Run the complete IncidentIQ investigation workflow.
@@ -184,6 +201,12 @@ def run_investigation(
             Optional callback receiving:
                 (step_name, current_state)
 
+        request_id:
+            API request correlation identifier.
+
+        job_id:
+            Background investigation job identifier.
+
     Returns:
         Final investigation state.
     """
@@ -195,6 +218,9 @@ def run_investigation(
     workflow = build_workflow()
 
     initial_state = {
+        "request_id": request_id,
+        "job_id": job_id,
+        "investigation_id": "",
         "incident": query,
         "observations": [],
         "evidence": [],
@@ -214,7 +240,7 @@ def run_investigation(
 
     config = {
         "configurable": {
-            "progress_callback": progress_callback
+            "progress_callback": progress_callback,
         }
     }
 
@@ -234,7 +260,6 @@ def run_investigation(
                     f"✓ Completed node: {node_name}"
                 )
 
-                # LangGraph-level progress notification.
                 if progress_callback:
 
                     progress_callback(

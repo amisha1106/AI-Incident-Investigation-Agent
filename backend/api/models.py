@@ -38,6 +38,12 @@ class InvestigationRequest(BaseModel):
 class InvestigationResponse(BaseModel):
     success: bool
     query: str
+
+    # Correlation identifiers
+    request_id: str | None = None
+    job_id: str | None = None
+    investigation_id: str | None = None
+
     observations: list[str]
     evidence: list[str]
     hypotheses: list[str]
@@ -52,13 +58,16 @@ class InvestigationResponse(BaseModel):
 class MetricsResponse(BaseModel):
     metrics: list[dict]
 
+
 class InvestigationJobResponse(BaseModel):
     job_id: str
+    request_id: str | None = None
     status: str
 
 
 class InvestigationJobStatusResponse(BaseModel):
     job_id: str
+    request_id: str | None = None
     status: str
     created_at: float | None = None
     started_at: float | None = None

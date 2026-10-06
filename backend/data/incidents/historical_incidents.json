@@ -1,0 +1,99 @@
+[
+  {
+    "id": "INC-2025-001",
+    "date": "2025-02-14",
+    "title": "Checkout latency spike after v3.5 deployment",
+    "service": "checkout-service",
+    "root_cause": "Database connection pool exhaustion due to missing connection.close() in retry loop. Connections accumulated until pool was saturated, causing 30s timeouts.",
+    "resolution": "Rolled back v3.5, fixed connection leak, redeployed as v3.5.1. Added connection pool monitoring alert.",
+    "duration_minutes": 45,
+    "impact": "High \u2014 8000 users affected, $12k revenue loss",
+    "signals": [
+      "error_rate > 5%",
+      "latency_p99 > 5000ms",
+      "db_connections > 90%"
+    ],
+    "tags": [
+      "db-connection-leak",
+      "checkout",
+      "latency"
+    ]
+  },
+  {
+    "id": "INC-2025-002",
+    "date": "2025-03-22",
+    "title": "Payment gateway OOM crash",
+    "service": "payment-gateway",
+    "root_cause": "JDBC driver upgrade introduced a result-set caching bug that cached large LOB objects in heap. Memory grew unbounded until JVM OOM kill.",
+    "resolution": "Downgraded JDBC driver to 8.0.28. Added -Xmx heap limit and OOM alerting.",
+    "duration_minutes": 20,
+    "impact": "Critical \u2014 all payments failed for 20 minutes",
+    "signals": [
+      "jvm_heap > 95%",
+      "gc_pause > 2000ms",
+      "error_rate > 80%"
+    ],
+    "tags": [
+      "oom",
+      "jdbc",
+      "payment"
+    ]
+  },
+  {
+    "id": "INC-2025-003",
+    "date": "2025-04-10",
+    "title": "Auth service latency increase",
+    "service": "user-auth",
+    "root_cause": "JWT expiry reduction to 15 min caused 4x increase in token refresh calls, overloading Redis cache and causing cache stampede.",
+    "resolution": "Reverted JWT expiry to 1 hour. Implemented staggered token refresh with jitter.",
+    "duration_minutes": 30,
+    "impact": "Medium \u2014 2000 users required re-login",
+    "signals": [
+      "redis_hit_rate < 40%",
+      "auth_latency_p95 > 800ms"
+    ],
+    "tags": [
+      "jwt",
+      "cache-stampede",
+      "auth"
+    ]
+  },
+  {
+    "id": "INC-2025-004",
+    "date": "2025-05-05",
+    "title": "Inventory API slow queries after batch migration",
+    "service": "inventory-api",
+    "root_cause": "Bulk insert optimization removed explicit transaction commits, causing table-level locks to persist for entire batch duration (up to 5 min), blocking read queries.",
+    "resolution": "Added explicit commit every 1000 rows. Added read replica for inventory reads.",
+    "duration_minutes": 60,
+    "impact": "Medium \u2014 inventory reads degraded, no data loss",
+    "signals": [
+      "db_lock_wait > 30s",
+      "query_latency_p95 > 8000ms"
+    ],
+    "tags": [
+      "slow-query",
+      "db-lock",
+      "inventory"
+    ]
+  },
+  {
+    "id": "INC-2025-005",
+    "date": "2025-06-18",
+    "title": "Notification service message loss after Kafka migration",
+    "service": "notification-service",
+    "root_cause": "Kafka consumer group was misconfigured with auto-commit enabled and processing time exceeding session.timeout.ms, causing rebalances and message loss.",
+    "resolution": "Disabled auto-commit, implemented manual offset commit after processing. Increased session.timeout.ms to 60s.",
+    "duration_minutes": 90,
+    "impact": "High \u2014 ~15000 notifications dropped",
+    "signals": [
+      "kafka_consumer_lag > 10000",
+      "notification_delivery_rate < 50%"
+    ],
+    "tags": [
+      "kafka",
+      "message-loss",
+      "notification"
+    ]
+  }
+]

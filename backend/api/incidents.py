@@ -1,28 +1,44 @@
 """
-Incident investigation API routes.
+IncidentIQ Investigation API routes.
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError,
+)
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+)
+
 from loguru import logger
 
 from config import INVESTIGATION_TIMEOUT
+
 from graph.workflow import run_investigation
+
 from api.auth import verify_api_key
-from api.models import InvestigationRequest, InvestigationResponse
+
+from api.models import (
+    InvestigationRequest,
+    InvestigationResponse,
+    InvestigationJobResponse,
+    InvestigationJobStatusResponse,
+)
+
 from api.rate_limit import check_rate_limit
-import uuid
 
 from infrastructure.job_store import (
     create_job,
     get_job,
 )
-from api.models import (
-    InvestigationJobResponse,
-    InvestigationJobStatusResponse,
-)
+
 from observability.audit import audit_event
 
 
@@ -41,7 +57,13 @@ def investigate_incident(
     http_request: Request,
     _: None = Depends(verify_api_key),
 ):
-    check_rate_limit(http_request.client.host)
+    """
+    Run a synchronous incident investigation.
+    """
+
+    check_rate_limit(
+        http_request.client.host
+    )
 
     if not request.query.strip():
         raise HTTPException(
@@ -49,68 +71,127 @@ def investigate_incident(
             detail="Query cannot be empty",
         )
 
+    request_id = getattr(
+        http_request.state,
+        "request_id",
+        None,
+    )
+
     investigation_start = time.perf_counter()
 
+    audit_event(
+        "investigation.created",
+        request_id=request_id,
+        job_id=None,
+        status="started",
+        mode="sync",
+    )
+
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
+
+        with ThreadPoolExecutor(
+            max_workers=1
+        ) as executor:
+
             future = executor.submit(
                 run_investigation,
                 request.query,
+                None,
+                request_id,
+                None,
             )
 
             try:
+
                 state = future.result(
                     timeout=INVESTIGATION_TIMEOUT
                 )
+
             except TimeoutError:
+
                 logger.error(
                     f"Investigation timed out after "
                     f"{INVESTIGATION_TIMEOUT} seconds."
                 )
+
+                audit_event(
+                    "investigation.timeout",
+                    request_id=request_id,
+                    job_id=None,
+                    investigation_id=state.get(
+                        "investigation_id"
+                    )
+                    if "state" in locals()
+                    else None,
+                )
+
                 raise HTTPException(
                     status_code=504,
                     detail="Investigation timed out.",
                 )
 
         investigation_duration = (
-            time.perf_counter() - investigation_start
+            time.perf_counter()
+            - investigation_start
         )
 
         return {
             "success": True,
             "query": request.query,
+
+            "request_id": state.get(
+                "request_id",
+                request_id,
+            ),
+
+            "job_id": state.get(
+                "job_id"
+            ),
+
+            "investigation_id": state.get(
+                "investigation_id"
+            ),
+
             "observations": state.get(
                 "observations",
                 [],
             ),
+
             "evidence": state.get(
                 "evidence",
                 [],
             ),
+
             "hypotheses": state.get(
                 "hypotheses",
                 [],
             ),
+
             "tools_used": state.get(
                 "tools_used",
                 [],
             ),
+
             "evidence_gaps": state.get(
                 "evidence_gaps",
                 [],
             ),
+
             "confidence": state.get(
                 "confidence",
                 0.0,
             ),
+
             "investigation_duration_seconds": round(
                 investigation_duration,
                 3,
             ),
+
             "stop_reason": state.get(
                 "stop_reason",
                 "max_iterations_reached",
             ),
+
             "final_result": state.get(
                 "final_result",
                 {},
@@ -121,13 +202,23 @@ def investigate_incident(
         raise
 
     except Exception as e:
+
         logger.error(
             f"Investigation failed: {e}"
         )
+
+        audit_event(
+            "investigation.api_failed",
+            request_id=request_id,
+            job_id=None,
+            error=str(e),
+        )
+
         raise HTTPException(
             status_code=500,
             detail="Investigation failed.",
         )
+
 
 @router.post(
     "/investigate/async",
@@ -139,6 +230,9 @@ def investigate_incident_async(
     http_request: Request,
     _: None = Depends(verify_api_key),
 ):
+    """
+    Queue an asynchronous investigation job.
+    """
 
     check_rate_limit(
         http_request.client.host
@@ -150,6 +244,12 @@ def investigate_incident_async(
             detail="Query cannot be empty",
         )
 
+    request_id = getattr(
+        http_request.state,
+        "request_id",
+        None,
+    )
+
     job_id = str(
         uuid.uuid4()
     )
@@ -157,23 +257,24 @@ def investigate_incident_async(
     create_job(
         job_id=job_id,
         query=request.query,
+        request_id=request_id,
     )
 
     audit_event(
         "investigation.created",
+        request_id=request_id,
         job_id=job_id,
-        request_id=getattr(
-            http_request.state,
-            "request_id",
-            None,
-        ),
+        investigation_id=None,
         status="queued",
+        mode="async",
     )
 
     return {
         "job_id": job_id,
+        "request_id": request_id,
         "status": "queued",
     }
+
 
 @router.get(
     "/jobs/{job_id}",
@@ -184,12 +285,17 @@ def get_investigation_job(
     http_request: Request,
     _: None = Depends(verify_api_key),
 ):
+    """
+    Retrieve the status/result of an asynchronous investigation.
+    """
 
     check_rate_limit(
         http_request.client.host
     )
 
-    job = get_job(job_id)
+    job = get_job(
+        job_id
+    )
 
     if job is None:
         raise HTTPException(

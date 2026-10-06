@@ -30,6 +30,8 @@ from infrastructure.cache import (
 
 from infrastructure.redis_client import get_redis
 
+from observability.audit import audit_event
+
 
 running = True
 
@@ -46,10 +48,7 @@ def update_worker_heartbeat():
     )
 
 
-def shutdown_handler(
-    signum,
-    frame,
-):
+def shutdown_handler(signum, frame):
     global running
 
     logger.info(
@@ -70,10 +69,7 @@ signal.signal(
 )
 
 
-def process_job(
-    job_id: str,
-):
-
+def process_job(job_id: str):
     from graph.workflow import run_investigation
 
     job = get_job(job_id)
@@ -85,6 +81,7 @@ def process_job(
         return
 
     query = job["query"]
+    request_id = job.get("request_id")
 
     update_job(
         job_id,
@@ -93,14 +90,16 @@ def process_job(
     )
 
     logger.info(
-        f"[Worker] Starting job {job_id}"
+        "[Worker] Starting job "
+        f"{job_id} "
+        f"request_id={request_id}"
     )
 
     try:
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # Cache lookup
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         cached_result = get_cached(
             "investigation",
@@ -111,6 +110,22 @@ def process_job(
 
             logger.info(
                 f"[Worker] Cache hit for job {job_id}"
+            )
+
+            # Preserve the cached investigation result while
+            # attaching the current request/job correlation.
+            cached_result = dict(cached_result)
+
+            cached_result["request_id"] = request_id
+            cached_result["job_id"] = job_id
+
+            audit_event(
+                "investigation.cache_hit",
+                request_id=request_id,
+                job_id=job_id,
+                investigation_id=cached_result.get(
+                    "investigation_id"
+                ),
             )
 
             update_job(
@@ -126,17 +141,19 @@ def process_job(
             f"[Worker] Cache miss for job {job_id}"
         )
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # Run investigation
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         state = run_investigation(
-            query
+            query,
+            request_id=request_id,
+            job_id=job_id,
         )
 
-        # -------------------------------------------------
-        # Store investigation result in cache
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # Cache result
+        # -----------------------------------------------------
 
         set_cached(
             "investigation",
@@ -145,13 +162,13 @@ def process_job(
         )
 
         logger.info(
-            f"[Worker] Investigation result cached for "
-            f"job {job_id}"
+            f"[Worker] Investigation result cached "
+            f"for job {job_id}"
         )
 
-        # -------------------------------------------------
-        # Complete job
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # Persist completed job
+        # -----------------------------------------------------
 
         update_job(
             job_id,
@@ -168,6 +185,13 @@ def process_job(
 
         logger.exception(
             f"[Worker] Job {job_id} failed: {exc}"
+        )
+
+        audit_event(
+            "investigation.job_failed",
+            request_id=request_id,
+            job_id=job_id,
+            error=str(exc),
         )
 
         update_job(
@@ -190,15 +214,11 @@ def main():
 
         current_time = time.time()
 
-        # -------------------------------------------------
-        # Worker heartbeat
-        # -------------------------------------------------
-
         update_worker_heartbeat()
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # Recover stuck jobs
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         if (
             current_time - last_recovery_check
@@ -208,6 +228,7 @@ def main():
             recovered_jobs = recover_stuck_jobs()
 
             for recovered_job_id in recovered_jobs:
+
                 logger.warning(
                     "[Worker] Recovered stuck job "
                     f"{recovered_job_id}"
@@ -215,9 +236,9 @@ def main():
 
             last_recovery_check = current_time
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # Claim next job
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         job_id = claim_job(
             timeout=5

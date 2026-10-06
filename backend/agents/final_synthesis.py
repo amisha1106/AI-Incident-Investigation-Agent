@@ -12,6 +12,100 @@ from loguru import logger
 
 from llm import call_gemini
 
+
+# ---------------------------------------------------------------------
+# Text normalization
+# ---------------------------------------------------------------------
+
+def _normalize_text(value) -> str:
+    """
+    Normalize minor whitespace/formatting artifacts in generated
+    investigation text.
+
+    This is intentionally conservative:
+    - fixes known concatenation artifacts
+    - fixes missing spaces around occurrence counters
+    - does not rewrite the meaning of evidence
+    """
+    text = str(value).strip()
+
+    replacements = {
+        "connection-managementevidence": "connection-management evidence",
+        "connection-poolsaturation": "connection-pool saturation",
+        "relationshipbetween": "relationship between",
+        "Database errorpattern": "Database error pattern",
+        "database errorpattern": "database error pattern",
+        "errorpattern": "error pattern",
+        "Databaseconnectivity": "Database connectivity",
+        "Databaseconnection": "Database connection",
+        "nearsaturation": "near saturation",
+        "andalerting": "and alerting",
+        "andconnection": "and connection",
+        "after30s": "after 30s",
+        "after60s": "after 60s",
+        "after90s": "after 90s",
+        "before30s": "before 30s",
+        "before60s": "before 60s",
+        "before90s": "before 90s",
+    }
+
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+
+    # Example:
+    # "5time(s)" -> "5 time(s)"
+    text = re.sub(
+        r"(?<=\d)time\(s\)",
+        " time(s)",
+        text,
+    )
+
+    # Example:
+    # "3occurrence" -> "3 occurrence"
+    text = re.sub(
+        r"(?<=\d)occurrence\b",
+        " occurrence",
+        text,
+    )
+
+    return text
+
+
+def _normalize_text_list(values) -> list[str]:
+    """
+    Normalize and deduplicate a list of textual investigation items.
+    """
+    normalized = []
+
+    for value in values or []:
+        text = _normalize_text(value)
+
+        if text and text not in normalized:
+            normalized.append(text)
+
+    return normalized
+
+
+def _normalize_result(value):
+    if isinstance(value, str):
+        return _normalize_text(value)
+
+    if isinstance(value, list):
+        return [_normalize_result(item) for item in value]
+
+    if isinstance(value, dict):
+        return {
+            key: _normalize_result(item)
+            for key, item in value.items()
+        }
+
+    return value
+
+
+# ---------------------------------------------------------------------
+# Insufficient-evidence result
+# ---------------------------------------------------------------------
+
 def _build_insufficient_evidence_result(
     incident: str,
     observations: list,
@@ -38,7 +132,6 @@ def _build_insufficient_evidence_result(
 
     return {
         "incident_summary": incident,
-
         "root_cause": {
             "summary": (
                 "No reliable root cause could be established "
@@ -52,9 +145,7 @@ def _build_insufficient_evidence_result(
             ),
             "confidence": "low",
         },
-
         "supporting_evidence": evidence,
-
         "alternative_hypotheses": [
             {
                 "hypothesis": str(hypothesis),
@@ -65,29 +156,28 @@ def _build_insufficient_evidence_result(
             }
             for hypothesis in hypotheses[-5:]
         ],
-
         "probable_solution": [
             "Collect additional incident-specific telemetry.",
             "Identify the affected component or dependency.",
             "Use the additional evidence to distinguish between competing hypotheses.",
         ],
-
         "immediate_actions": [
             "Continue monitoring the affected service.",
             "Collect application, dependency, and infrastructure telemetry.",
             "Avoid making irreversible remediation decisions based only on the current evidence.",
         ],
-
         "long_term_prevention": [
             "Improve observability coverage across application and downstream dependencies.",
             "Ensure incidents contain enough component and symptom context for investigation.",
         ],
-
         "evidence_gaps": gaps,
-
         "severity": "medium",
     }
 
+
+# ---------------------------------------------------------------------
+# Deterministic fallback result
+# ---------------------------------------------------------------------
 
 def _build_fallback_result(
     incident: str,
@@ -177,7 +267,7 @@ def _build_fallback_result(
             "Review the payment retry logic for excessive or repeated "
             "database connection usage.",
             "Validate connection acquisition and release behavior "
-            "before increasing pool capacity."
+            "before increasing pool capacity.",
         ]
 
         immediate_actions = [
@@ -186,7 +276,7 @@ def _build_fallback_result(
             "Monitor database connection-pool utilization and "
             "checkout latency during mitigation.",
             "Inspect active database connections for leaks or "
-            "unexpected retry amplification."
+            "unexpected retry amplification.",
         ]
 
         long_term_prevention = [
@@ -196,7 +286,7 @@ def _build_fallback_result(
             "Add regression tests for retry behavior and connection "
             "cleanup.",
             "Correlate deployment changes with latency and error-rate "
-            "changes in observability dashboards."
+            "changes in observability dashboards.",
         ]
 
     elif db_pool_issue:
@@ -226,17 +316,17 @@ def _build_fallback_result(
 
         probable_solution = [
             "Investigate database connection acquisition and release.",
-            "Review connection-pool configuration and usage patterns."
+            "Review connection-pool configuration and usage patterns.",
         ]
 
         immediate_actions = [
             "Monitor database connection-pool utilization.",
-            "Investigate active and leaked database connections."
+            "Investigate active and leaked database connections.",
         ]
 
         long_term_prevention = [
             "Add database connection-pool saturation monitoring.",
-            "Add connection lifecycle and leak detection."
+            "Add connection lifecycle and leak detection.",
         ]
 
     elif latency_issue and error_issue:
@@ -259,17 +349,17 @@ def _build_fallback_result(
 
         probable_solution = [
             "Investigate the application and downstream dependencies "
-            "responsible for the latency and errors."
+            "responsible for the latency and errors.",
         ]
 
         immediate_actions = [
             "Monitor latency and error-rate trends.",
-            "Inspect application traces and downstream dependency health."
+            "Inspect application traces and downstream dependency health.",
         ]
 
         long_term_prevention = [
             "Improve distributed tracing and dependency-level monitoring.",
-            "Create alerts for correlated latency and error-rate spikes."
+            "Create alerts for correlated latency and error-rate spikes.",
         ]
 
     else:
@@ -290,17 +380,17 @@ def _build_fallback_result(
 
         probable_solution = [
             "Collect additional application, infrastructure, and "
-            "dependency-level evidence."
+            "dependency-level evidence.",
         ]
 
         immediate_actions = [
             "Continue monitoring the affected service.",
-            "Collect additional telemetry before making a causal decision."
+            "Collect additional telemetry before making a causal decision.",
         ]
 
         long_term_prevention = [
             "Improve observability coverage across application and "
-            "downstream dependencies."
+            "downstream dependencies.",
         ]
 
     # ---------------------------------------------------------
@@ -310,28 +400,32 @@ def _build_fallback_result(
     alternative_hypotheses = []
 
     if deployment_issue:
-        alternative_hypotheses.append({
+        alternative_hypotheses.append(
+            {
+                "hypothesis": (
+                    "The payment retry logic introduced by the latest "
+                    "deployment may be contributing to resource pressure."
+                ),
+                "reason": (
+                    "The deployment introduced payment retry logic, but "
+                    "the available evidence does not directly measure "
+                    "retry frequency or its database impact."
+                ),
+            }
+        )
+
+    alternative_hypotheses.append(
+        {
             "hypothesis": (
-                "The payment retry logic introduced by the latest "
-                "deployment may be contributing to resource pressure."
+                "An underlying database performance or dependency issue "
+                "may be contributing to the observed degradation."
             ),
             "reason": (
-                "The deployment introduced payment retry logic, but "
-                "the available evidence does not directly measure "
-                "retry frequency or its database impact."
+                "Database-level query execution and distributed tracing "
+                "evidence are not available."
             ),
-        })
-
-    alternative_hypotheses.append({
-        "hypothesis": (
-            "An underlying database performance or dependency issue "
-            "may be contributing to the observed degradation."
-        ),
-        "reason": (
-            "Database-level query execution and distributed tracing "
-            "evidence are not available."
-        ),
-    })
+        }
+    )
 
     # ---------------------------------------------------------
     # Severity
@@ -350,30 +444,26 @@ def _build_fallback_result(
 
     return {
         "incident_summary": incident,
-
         "root_cause": {
             "summary": root_cause_summary,
             "explanation": root_cause_explanation,
             "confidence": root_cause_confidence,
         },
-
         "supporting_evidence": supporting_evidence,
-
         "alternative_hypotheses": alternative_hypotheses,
-
         "probable_solution": probable_solution,
-
         "immediate_actions": immediate_actions,
-
         "long_term_prevention": long_term_prevention,
-
         "evidence_gaps": evidence_gaps + [
             "LLM-based final synthesis was unavailable.",
         ],
-
         "severity": severity,
     }
 
+
+# ---------------------------------------------------------------------
+# Main final synthesis
+# ---------------------------------------------------------------------
 
 def run_final_synthesis(
     incident: str,
@@ -396,6 +486,18 @@ def run_final_synthesis(
     )
 
     # ---------------------------------------------------------
+    # Normalize incoming investigation data
+    # ---------------------------------------------------------
+
+    incident = _normalize_text(incident)
+
+    observations = _normalize_text_list(observations)
+    evidence = _normalize_text_list(evidence)
+    hypotheses = _normalize_text_list(hypotheses)
+    tools_used = _normalize_text_list(tools_used)
+    evidence_gaps = _normalize_text_list(evidence_gaps)
+
+    # ---------------------------------------------------------
     # Explicit insufficient-evidence path
     # ---------------------------------------------------------
 
@@ -415,9 +517,8 @@ def run_final_synthesis(
                 "probable root cause."
             )
 
-        return {
+        result = {
             "incident_summary": incident,
-
             "root_cause": {
                 "summary": (
                     "No reliable root cause could be established "
@@ -431,9 +532,7 @@ def run_final_synthesis(
                 ),
                 "confidence": "low",
             },
-
             "supporting_evidence": evidence,
-
             "alternative_hypotheses": [
                 {
                     "hypothesis": str(hypothesis),
@@ -444,28 +543,25 @@ def run_final_synthesis(
                 }
                 for hypothesis in hypotheses[-5:]
             ],
-
             "probable_solution": [
                 "Collect additional incident-specific telemetry.",
                 "Identify the affected component or dependency.",
                 "Use the additional evidence to distinguish between competing hypotheses.",
             ],
-
             "immediate_actions": [
                 "Continue monitoring the affected service.",
                 "Collect application, dependency, and infrastructure telemetry.",
                 "Avoid making irreversible remediation decisions based only on the current evidence.",
             ],
-
             "long_term_prevention": [
                 "Improve observability coverage across application and downstream dependencies.",
                 "Ensure incidents contain enough component and symptom context for investigation.",
             ],
-
             "evidence_gaps": gaps,
-
             "severity": "medium",
         }
+
+        return _normalize_result(result)
 
     # ---------------------------------------------------------
     # Normal Gemini synthesis
@@ -479,24 +575,31 @@ an investigation and produce a cautious, evidence-based
 incident assessment.
 
 INCIDENT:
+
 {incident}
 
 TOOLS USED:
+
 {json.dumps(tools_used, indent=2)}
 
 INVESTIGATION STOP REASON:
+
 {stop_reason}
 
 OBSERVATIONS:
+
 {json.dumps(observations, indent=2, default=str)}
 
 EVIDENCE:
+
 {json.dumps(evidence, indent=2, default=str)}
 
 HYPOTHESES:
+
 {json.dumps(hypotheses, indent=2, default=str)}
 
 EVIDENCE GAPS:
+
 {json.dumps(evidence_gaps, indent=2, default=str)}
 
 IMPORTANT RULES:
@@ -563,6 +666,30 @@ Return this structure:
         response = call_gemini(prompt)
 
         text = re.sub(
+            r"(?<=\d)time\(s\)",
+            " time(s)",
+            text,
+        )
+
+        text = re.sub(
+            r"(?<=\d)occurrence\b",
+            " occurrence",
+            text,
+        )
+
+        text = re.sub(
+            r"\bat(?=\d{4}-\d{2}-\d{2}T)",
+            "at ",
+            text,
+        )
+
+        text = re.sub(
+            r"\boccurred(?=\d+\s*time)",
+            "occurred ",
+            text,
+        )
+
+        text = re.sub(
             r"```(?:json)?\s*",
             "",
             response,
@@ -578,9 +705,9 @@ Return this structure:
             text.strip()
         )
 
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
         # Confidence calibration
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
 
         gap_text = " ".join(
             str(gap).lower()
@@ -612,7 +739,7 @@ Return this structure:
             current_confidence = str(
                 result["root_cause"].get(
                     "confidence",
-                    "low"
+                    "low",
                 )
             ).lower()
 
@@ -621,7 +748,6 @@ Return this structure:
                 and causal_gaps_present >= 1
             ):
                 result["root_cause"]["confidence"] = "medium"
-
 
     except Exception as e:
 
@@ -638,6 +764,18 @@ Return this structure:
             tools_used=tools_used,
             evidence_gaps=evidence_gaps,
         )
+
+    # ---------------------------------------------------------
+    # Final output normalization
+    #
+    # This runs for BOTH:
+    # - Gemini-generated results
+    # - deterministic fallback results
+    #
+    # Therefore formatting artifacts cannot leak through the API.
+    # ---------------------------------------------------------
+
+    result = _normalize_result(result)
 
     logger.info(
         "[FinalSynthesis] Final assessment generated."

@@ -1,35 +1,56 @@
 """
-Audit event logging.
+Audit logging for IncidentIQ investigations.
 """
 
+import json
 import time
-import uuid
 
-from loguru import logger
+from infrastructure.redis_client import get_redis
 
 
-def audit_event(
-    event: str,
-    *,
-    job_id: str | None = None,
-    request_id: str | None = None,
-    status: str | None = None,
-    tool: str | None = None,
-    duration_seconds: float | None = None,
-):
+AUDIT_STREAM_KEY = "incidentiq:audit"
 
-    event_id = str(
-        uuid.uuid4()
+
+def audit_event(event: str, **details):
+    """
+    Persist a structured investigation audit event in Redis.
+    """
+
+    payload = {
+        "timestamp": time.time(),
+        "event": event,
+        **details,
+    }
+
+    redis_client = get_redis()
+
+    redis_client.rpush(
+        AUDIT_STREAM_KEY,
+        json.dumps(payload),
     )
 
-    logger.info(
-        "AUDIT "
-        f"event_id={event_id} "
-        f"event={event} "
-        f"job_id={job_id} "
-        f"request_id={request_id} "
-        f"status={status} "
-        f"tool={tool} "
-        f"duration={duration_seconds} "
-        f"timestamp={time.time()}"
+    # Keep the audit stream bounded.
+    redis_client.ltrim(
+        AUDIT_STREAM_KEY,
+        -5000,
+        -1,
     )
+
+
+def get_audit_events(limit: int = 100):
+    """
+    Return the most recent audit events.
+    """
+
+    redis_client = get_redis()
+
+    raw_events = redis_client.lrange(
+        AUDIT_STREAM_KEY,
+        -limit,
+        -1,
+    )
+
+    return [
+        json.loads(event)
+        for event in raw_events
+    ]
